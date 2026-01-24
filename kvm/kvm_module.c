@@ -6,13 +6,36 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <signal.h>
+
 
 #define MEMORY_SIZE 0x400000 // 4MB
+#define KVM_EXIT_IO 2        // VM exit reason for I/O
+static volatile sig_atomic_t keep_running = 1;
+
+static void sig_handler(int _)
+{
+    (void)_;
+    keep_running = 0;
+}
+
+void handle_io_exit(struct kvm_run *run) {
+    if (run->io.direction == KVM_EXIT_IO_OUT) {
+        printf("Guest wrote to port 0x%x: value=0x%x\n",
+               run->io.port,
+               *((uint8_t *)run + run->io.data_offset));
+    } else {
+        printf("Guest read from port 0x%x\n", run->io.port);
+    }
+}
+
 
 int main() {
     int kvm, vm, vcpufd;
     void *vm_mem;
     struct kvm_userspace_memory_region mem;
+    struct kvm_run *run;
+    signal(SIGINT, sig_handler);
 
     // Open the KVM device
     kvm = open("/dev/kvm", O_RDWR);
@@ -63,11 +86,38 @@ int main() {
 
     printf("VM and vCPU successfully created.\n");
 
-    // Cleanup
-    close(vcpufd);
+    run = (struct kvm_run *)vm_mem;
+
+    // Run the vCPU loop
+    while (keep_running) {
+        if (ioctl(vcpufd, KVM_RUN, 0) < 0) {
+            perror("KVM_RUN failed");
+            break;
+        }
+
+        // Handle VM exits
+        switch (run->exit_reason) {
+            case KVM_EXIT_IO:
+            case KVM_EXIT_IO_OUT:
+            case KVM_EXIT_IO_IN:
+                handle_io_exit(run);
+                break;
+            case KVM_EXIT_HLT:
+                printf("Guest halted.\n");
+                goto cleanup;
+            default:
+                printf("Unhandled exit reason: %d\n", run->exit_reason); // the meaning of the codes can be found in kvm.h, after the struct kvm_run definition
+                goto cleanup;
+        }
+    }
+    goto cleanup;
+    
+// Cleanup resources
+cleanup:
     munmap(vm_mem, MEMORY_SIZE);
+    close(vcpufd);
     close(vm);
     close(kvm);
-    
+    printf("cleanup successful");
     return 0;
 }
