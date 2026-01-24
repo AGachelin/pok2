@@ -36,6 +36,7 @@ int main() {
     struct kvm_userspace_memory_region mem;
     struct kvm_run *run;
     signal(SIGINT, sig_handler);
+    int result = 0;
 
     // Open the KVM device
     kvm = open("/dev/kvm", O_RDWR);
@@ -55,9 +56,8 @@ int main() {
     vm_mem = mmap(NULL, MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (vm_mem == MAP_FAILED) {
         perror("Failed to allocate memory");
-        close(vm);
-        close(kvm);
-        return 1;
+        result = 1;
+        goto cleanup;
     }
 
     // Map memory to the VM
@@ -68,20 +68,16 @@ int main() {
 
     if (ioctl(vm, KVM_SET_USER_MEMORY_REGION, &mem) < 0) {
         perror("Failed to set user memory region");
-        munmap(vm_mem, MEMORY_SIZE);
-        close(vm);
-        close(kvm);
-        return 1;
+        result = 1;
+        goto cleanup;
     }
 
     // Create a vCPU (virtual CPU)
     vcpufd = ioctl(vm, KVM_CREATE_VCPU, 0);
     if (vcpufd < 0) {
         perror("Failed to create vCPU");
-        munmap(vm_mem, MEMORY_SIZE);
-        close(vm);
-        close(kvm);
-        return 1;
+        result = 1;
+        goto cleanup;
     }
 
     printf("VM and vCPU successfully created.\n");
@@ -92,6 +88,7 @@ int main() {
     while (keep_running) {
         if (ioctl(vcpufd, KVM_RUN, 0) < 0) {
             perror("KVM_RUN failed");
+            result = 1;
             break;
         }
 
@@ -111,7 +108,7 @@ int main() {
         }
     }
     goto cleanup;
-    
+
 // Cleanup resources
 cleanup:
     munmap(vm_mem, MEMORY_SIZE);
@@ -119,5 +116,5 @@ cleanup:
     close(vm);
     close(kvm);
     printf("cleanup successful");
-    return 0;
+    return result;
 }
