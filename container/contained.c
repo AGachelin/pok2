@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/mount.h>
 #include <string.h>
 
 #define STACK_SIZE 1024 * 64
@@ -48,10 +49,19 @@ void set_env(){
     }
 }
 
+void set_fs(const char *folder)
+{
+        chroot(folder);
+        chdir("/");
+}
+
+
 int fn(void *){
     printf("inside container\n");
     set_hostname("container");
     set_env();
+    set_fs("fs"); //should contain a minimal filesystem, i used https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz
+    mount("proc","/proc","proc",0,0);
     char *cmd[] = {"/bin/sh", NULL};
     if(execvp(cmd[0],cmd)){
         perror("could not execute shell");
