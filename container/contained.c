@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #define STACK_SIZE 1024 * 64
+// flags for new UTS and PID namespaces (i.e namespace isolation) ; SIGCHLD to notify parent on child termination
 #define FLAGS (CLONE_NEWUTS | CLONE_NEWPID | SIGCHLD)
 
 char* create_stack() {
