@@ -9,9 +9,19 @@
 #include <sys/wait.h>
 #include <sys/mount.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #define STACK_SIZE 1024 * 64
 #define FLAGS (CLONE_NEWUTS | CLONE_NEWPID | SIGCHLD)
+
+struct child_config {
+	int argc;
+	uid_t uid;
+	int fd;
+	char *hostname;
+	char **argv;
+	char *mount_dir;
+};
 
 char* create_stack() {
     char* stack = (char*)malloc(STACK_SIZE);
@@ -57,7 +67,6 @@ void set_fs(const char *folder)
 
 
 int fn(void *){
-    printf("inside container\n");
     set_hostname("container");
     set_env();
     set_fs("fs");
@@ -70,16 +79,35 @@ int fn(void *){
 }
 
 int main() {
+    int err = 0;
+    struct child_config config = {0};
+    int sockets[2] = {0};
+    config.hostname = "container";
+    if (socketpair(AF_LOCAL, SOCK_SEQPACKET, 0, sockets)) {
+		fprintf(stderr, "socketpair failed: %m\n");
+		goto error;
+	}
+	if (fcntl(sockets[0], F_SETFD, FD_CLOEXEC)) {
+		fprintf(stderr, "fcntl failed: %m\n");
+		goto error;
+	}
+	config.fd = sockets[1];
     char* stack_top = create_stack();
     printf("Stack created at address: %p\n", stack_top);
-    pid_t pid = clone(fn, stack_top, FLAGS, 0);
+    pid_t pid = clone(fn, stack_top, FLAGS, &config);
     if (pid == -1) {
         perror("Failed to create clone");
-        free(stack_top - STACK_SIZE);
-        exit(1);
+        goto error;
     }
     printf("Container created successfully.\n");
     waitpid(pid, NULL, 0);
+    
+
+error:
+    err=1;
+cleanup:
     free(stack_top - STACK_SIZE);
-    return 0;
+	if (sockets[0]) close(sockets[0]);
+	if (sockets[1]) close(sockets[1]);
+    return err;
 }
