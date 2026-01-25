@@ -20,8 +20,16 @@ char* create_stack() {
     return stack + STACK_SIZE;
 }
 
+void set_hostname(const char* hostname) {
+    if (sethostname(hostname, strlen(hostname)) == -1) {
+        perror("Failed to set hostname");
+        exit(1);
+    }
+}
+
 int fn(void *){
     printf("inside container\n");
+    set_hostname("container");
     char *cmd[] = {"/bin/sh", NULL};
     if(execvp(cmd[0],cmd)){
         perror("could not execute shell");
