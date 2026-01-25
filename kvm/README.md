@@ -1,1 +1,1 @@
-Code based on https://en.ittrip.xyz/c-language/c-kvm-hypervisor-guide#index_id25, modified mostly to understand it better
+Code based on https://en.ittrip.xyz/c-language/c-kvm-hypervisor-guide

@@ -81,6 +81,11 @@ int main() {
     }
 
     printf("VM and vCPU successfully created.\n");
+    
+    // Get the vCPU's registers and print the instruction pointer (RIP)
+    struct kvm_regs regs;
+    ioctl(vcpufd, KVM_GET_REGS, &regs);
+    printf("RIP: 0x%llx\n", regs.rip);
 
     run = (struct kvm_run *)vm_mem;
 
@@ -98,6 +103,9 @@ int main() {
             case KVM_EXIT_IO_OUT:
             case KVM_EXIT_IO_IN:
                 handle_io_exit(run);
+                break;
+            case KVM_EXIT_MMIO:
+                printf("Guest MMIO (memory mapped input/output) access at address 0x%llx\n", run->mmio.phys_addr);
                 break;
             case KVM_EXIT_HLT:
                 printf("Guest halted.\n");
