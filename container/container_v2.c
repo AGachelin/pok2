@@ -1,4 +1,4 @@
-// source (in C++): https://y4riss.github.io/posts/containers101/
+// source : https://blog.lizzie.io/linux-containers-in-500-loc.html
 #define _GNU_SOURCE
 #include <sched.h>
 #include <sys/syscall.h>
@@ -11,7 +11,6 @@
 #include <string.h>
 
 #define STACK_SIZE 1024 * 64
-// flags for new UTS and PID namespaces (i.e namespace isolation) ; SIGCHLD to notify parent on child termination
 #define FLAGS (CLONE_NEWUTS | CLONE_NEWPID | SIGCHLD)
 
 char* create_stack() {
@@ -61,7 +60,7 @@ int fn(void *){
     printf("inside container\n");
     set_hostname("container");
     set_env();
-    set_fs("fs"); //should contain a minimal filesystem, i used https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz
+    set_fs("fs");
     mount("proc","/proc","proc",0,0);
     char *cmd[] = {"/bin/sh", NULL};
     if(execvp(cmd[0],cmd)){
