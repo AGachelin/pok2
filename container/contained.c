@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <string.h>
 
 #define STACK_SIZE 1024 * 64
 // flags for new UTS and PID namespaces (i.e namespace isolation) ; SIGCHLD to notify parent on child termination
@@ -27,9 +28,30 @@ void set_hostname(const char* hostname) {
     }
 }
 
+void set_env(){
+    clearenv();
+    if(setenv("PS1", "container:# ", 1) != 0) {
+        perror("Failed to set PS1");
+        exit(1);
+    }
+    if(setenv("TERM", "xterm-256color", 0) != 0) {
+        perror("Failed to set TERM");
+        exit(1);
+    }
+    if(setenv("PS1","[\\u@\\h \\W]\\$ ",0) != 0) {
+        perror("Failed to set PS1");
+        exit(1);
+    }
+    if(setenv("PATH", "/bin/:/sbin/:/usr/bin:/usr/sbin", 0) != 0) {
+        perror("Failed to set PATH");
+        exit(1);
+    }
+}
+
 int fn(void *){
     printf("inside container\n");
     set_hostname("container");
+    set_env();
     char *cmd[] = {"/bin/sh", NULL};
     if(execvp(cmd[0],cmd)){
         perror("could not execute shell");
