@@ -112,8 +112,12 @@ int handle_child_userns(pid_t child_pid, int fd) {
 
 int userns(struct child_config *config)
 {
-	fprintf(stderr, "=> trying to create a user namespace...");
+	fprintf(stderr, "=> trying to create a user namespace...\n");
 	int has_userns = !unshare(CLONE_NEWUSER);
+    if (!has_userns) {
+        fprintf(stderr, "user namespace creation failed : %m\n");
+	}
+
     // notify the parent about whether a user namespace was created
 	if (write(config->fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
 		fprintf(stderr, "couldn't notify parent: %m\n");
@@ -127,12 +131,7 @@ int userns(struct child_config *config)
 		return -1;
 	}
 	if (result) return -1;
-	if (has_userns) {
-		fprintf(stderr, "done.\n");
-	} else {
-		fprintf(stderr, "unsupported? continuing.\n");
-	}
-	fprintf(stderr, "=> switching to uid %d / gid %d...", config->uid, config->uid);
+	fprintf(stderr, "=> switching to uid %d / gid %d...\n", config->uid, config->uid);
 	if (setgroups(1, & (gid_t) { config->uid }) || // remove all groups except the one we are mapping to
 	    setresgid(config->uid, config->uid, config->uid) || //sets real/effective/saved GID
 	    setresuid(config->uid, config->uid, config->uid)) { //sets real/effective/saved UID
