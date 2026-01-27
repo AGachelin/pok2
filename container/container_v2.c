@@ -36,37 +36,19 @@ char* create_stack() {
     return stack + STACK_SIZE;
 }
 
-void set_hostname(const char* hostname) {
+int set_hostname(const char* hostname) {
     if (sethostname(hostname, strlen(hostname)) == -1) {
         perror("Failed to set hostname");
-        exit(1);
+        return -1;
     }
+    return 0;
 }
 
-void set_env(){
-    clearenv();
-    if(setenv("PS1", "container:# ", 1) != 0) {
-        perror("Failed to set PS1");
-        exit(1);
-    }
-    if(setenv("TERM", "xterm-256color", 0) != 0) {
-        perror("Failed to set TERM");
-        exit(1);
-    }
-    if(setenv("PS1","[\\u@\\h \\W]\\$ ",0) != 0) {
-        perror("Failed to set PS1");
-        exit(1);
-    }
-    if(setenv("PATH", "/bin/:/sbin/:/usr/bin:/usr/sbin", 0) != 0) {
-        perror("Failed to set PATH");
-        exit(1);
-    }
-}
-
-void set_fs(const char *folder)
+int set_fs(const char *folder)
 {
-        chroot(folder);
-        chdir("/");
+    chroot(folder);
+    chdir("/");
+    return 0;
 }
 
 int handle_child_userns(pid_t child_pid, int fd) {
@@ -142,22 +124,27 @@ int userns(struct child_config *config)
 	return 0;
 }
 
-int fn(void *arg){
-    struct child_config *config = arg;
-    set_hostname("container");
-    set_env();
-    set_fs("fs");
-    mount("proc","/proc","proc",0,0);
-    if(userns(config)){
-        fprintf(stderr, "Failed to setup user namespace : %m\n");
-        exit(1);
-    }
-    char *cmd[] = {"/bin/sh", NULL};
-    if(execvp(cmd[0],cmd)){
-        perror("could not execute shell");
-        exit(1);
-    }
-    return 0;
+int child(void *arg){
+	struct child_config *config = arg;
+	if (set_hostname(config->hostname)
+	    //|| mounts(config)
+        || set_fs("fs")
+        || userns(config)
+	    //|| capabilities()
+	    //|| syscalls()
+        ) {
+		close(config->fd);
+		return -1;
+	}
+	if (close(config->fd)) {
+		fprintf(stderr, "close failed: %m\n");
+		return -1;
+	}
+	if (execve(config->argv[0], config->argv, NULL)) {
+		fprintf(stderr, "execve failed! %m.\n");
+		return -1;
+	}
+	return 0;
 }
 
 int main() {
@@ -165,6 +152,7 @@ int main() {
     struct child_config config = {0};
     int sockets[2] = {0};
     config.hostname = "container";
+    config.argv = (char *[]) { "/bin/sh", NULL };
     if (socketpair(AF_LOCAL, SOCK_SEQPACKET, 0, sockets)) {
 		fprintf(stderr, "socketpair failed: %m\n");
 		goto error;
@@ -176,7 +164,7 @@ int main() {
 	config.fd = sockets[1];
     char* stack_top = create_stack();
     printf("Stack created at address: %p\n", stack_top);
-    pid_t pid = clone(fn, stack_top, FLAGS, &config);
+    pid_t pid = clone(child, stack_top, FLAGS, &config);
     if (pid == -1) {
         perror("Failed to create clone");
         goto clear_resources;
