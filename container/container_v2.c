@@ -1,6 +1,7 @@
 // source : https://blog.lizzie.io/linux-containers-in-500-loc.html
 #define _GNU_SOURCE
 #include <sched.h>
+#include <grp.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <stdio.h>
@@ -103,23 +104,61 @@ int handle_child_userns(pid_t child_pid, int fd) {
 	}
     // notify the child that the mapping is done
 	if (write(fd, & (int) { 0 }, sizeof(int)) != sizeof(int)) {
-		fprintf(stderr, "couldn't write: %m\n");
+		fprintf(stderr, "couldn't notify child: %m\n");
 		return -1;
 	}
 	return 0;
 }
 
+int userns(struct child_config *config)
+{
+	fprintf(stderr, "=> trying to create a user namespace...");
+	int has_userns = !unshare(CLONE_NEWUSER);
+    // notify the parent about whether a user namespace was created
+	if (write(config->fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
+		fprintf(stderr, "couldn't notify parent: %m\n");
+		return -1;
+	}
 
-int fn(void *){
+	int result = 0;
+    // wait for the parent to set up UID/GID mappings
+	if (read(config->fd, &result, sizeof(result)) != sizeof(result)) {
+		fprintf(stderr, "couldn't read: %m\n");
+		return -1;
+	}
+	if (result) return -1;
+	if (has_userns) {
+		fprintf(stderr, "done.\n");
+	} else {
+		fprintf(stderr, "unsupported? continuing.\n");
+	}
+	fprintf(stderr, "=> switching to uid %d / gid %d...", config->uid, config->uid);
+	if (setgroups(1, & (gid_t) { config->uid }) || // remove all groups except the one we are mapping to
+	    setresgid(config->uid, config->uid, config->uid) || //sets real/effective/saved GID
+	    setresuid(config->uid, config->uid, config->uid)) { //sets real/effective/saved UID
+		fprintf(stderr, "Failed to set UID, GID or to remove groups : %m\n");
+		return -1;
+	}
+	fprintf(stderr, "done.\n");
+	return 0;
+}
+
+int fn(void *arg){
+    struct child_config *config = arg;
     set_hostname("container");
     set_env();
     set_fs("fs");
     mount("proc","/proc","proc",0,0);
+    if(userns(config)){
+        fprintf(stderr, "Failed to setup user namespace : %m\n");
+        exit(1);
+    }
     char *cmd[] = {"/bin/sh", NULL};
     if(execvp(cmd[0],cmd)){
         perror("could not execute shell");
         exit(1);
     }
+    return 0;
 }
 
 int main() {
