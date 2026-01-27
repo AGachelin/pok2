@@ -10,9 +10,12 @@
 #include <sys/mount.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <linux/limits.h>
 
 #define STACK_SIZE 1024 * 64
-#define FLAGS (CLONE_NEWUTS | CLONE_NEWPID | SIGCHLD)
+#define USERNS_OFFSET 10000
+#define USERNS_COUNT 2000
+#define FLAGS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWUTS | SIGCHLD)
 
 struct child_config {
 	int argc;
@@ -65,6 +68,47 @@ void set_fs(const char *folder)
         chdir("/");
 }
 
+int handle_child_userns(pid_t child_pid, int fd) {
+	int map_file = 0;
+	int has_userns = -1;
+    // check if the child created a user namespace
+	if (read(fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
+		fprintf(stderr, "couldn't read from child\n");
+		return -1;
+	}
+	if (has_userns) {
+		char path[PATH_MAX] = {0};
+        // write the UID (User ID) and GID (Group ID) maps
+		for (char **file = (char *[]) { "uid_map", "gid_map", 0 }; *file; file++) {
+			if (snprintf(path, sizeof(path), "/proc/%d/%s", child_pid, *file)
+			    > sizeof(path)) {
+				fprintf(stderr, "failed to build path %m\n");
+				return -1;
+			}
+			fprintf(stderr, "writing %s...", path);
+			if ((map_file = open(path, O_WRONLY)) == -1) {
+				fprintf(stderr, "open failed: %m\n");
+				return -1;
+			}
+            // write the mapping (so that the container's root user maps to a non-privileged user on the host):
+            // UID 0 inside the namespace maps to UID USERNS_OFFSET on the host
+            // for USERNS_COUNT UIDs
+			if (dprintf(map_file, "0 %d %d\n", USERNS_OFFSET, USERNS_COUNT) == -1) {
+				fprintf(stderr, "dprintf failed: %m\n");
+				close(map_file);
+				return -1;
+			}
+			close(map_file);
+		}
+	}
+    // notify the child that the mapping is done
+	if (write(fd, & (int) { 0 }, sizeof(int)) != sizeof(int)) {
+		fprintf(stderr, "couldn't write: %m\n");
+		return -1;
+	}
+	return 0;
+}
+
 
 int fn(void *){
     set_hostname("container");
@@ -97,16 +141,30 @@ int main() {
     pid_t pid = clone(fn, stack_top, FLAGS, &config);
     if (pid == -1) {
         perror("Failed to create clone");
-        goto error;
+        goto clear_resources;
     }
+    close(sockets[1]);
+	sockets[1] = 0;
     printf("Container created successfully.\n");
-    waitpid(pid, NULL, 0);
-    
+	if (handle_child_userns(pid, sockets[0])) {
+		err = 1;
+		goto kill_and_finish_child;
+	}
 
+	goto finish_child;
+
+kill_and_finish_child:
+	if (pid) kill(pid, SIGKILL);
+finish_child:;
+	int child_status = 0;
+	waitpid(pid, &child_status, 0);
+	err |= WEXITSTATUS(child_status);
+    
+clear_resources:
+    free(stack_top - STACK_SIZE);
 error:
     err=1;
 cleanup:
-    free(stack_top - STACK_SIZE);
 	if (sockets[0]) close(sockets[0]);
 	if (sockets[1]) close(sockets[1]);
     return err;
