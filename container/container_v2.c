@@ -44,12 +44,71 @@ int set_hostname(const char* hostname) {
     return 0;
 }
 
-int set_fs(const char *folder)
+int pivot_root(const char *new_root, const char *put_old)
 {
-    chroot(folder);
-    chdir("/");
-    return 0;
+       return syscall(SYS_pivot_root, new_root, put_old);
 }
+
+int mounts(struct child_config *config)
+{
+	fprintf(stderr, "=> remounting everything with MS_PRIVATE...\n");
+    // make sure that mount changes don't propagate to or from the host, MS_REC makes it recursive
+	if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) {
+		fprintf(stderr, "failed to remount with MS_PRIVATE : %m\n");
+		return -1;
+	}
+	fprintf(stderr, "remounted.\n");
+
+	fprintf(stderr, "=> making a temp directory and a bind mount there...\n");
+	char mount_dir[] = "/tmp/tmp.XXXXXX";
+	if (!mkdtemp(mount_dir)) {
+		fprintf(stderr, "failed making a directory : %m\n");
+		return -1;
+	}
+
+	if (mount(config->mount_dir, mount_dir, NULL, MS_BIND | MS_PRIVATE, NULL)) {
+		fprintf(stderr, "bind mount failed : %m\n");
+		return -1;
+	}
+
+	char inner_mount_dir[] = "/tmp/tmp.XXXXXX/oldroot.XXXXXX";
+	memcpy(inner_mount_dir, mount_dir, sizeof(mount_dir) - 1);
+	if (!mkdtemp(inner_mount_dir)) {
+		fprintf(stderr, "failed making the inner directory : %m\n");
+		return -1;
+	}
+	fprintf(stderr, "done.\n");
+
+	fprintf(stderr, "=> pivoting root...\n");
+	if (pivot_root(mount_dir, inner_mount_dir)) {
+		fprintf(stderr, "failed to pivot root : %m\n");
+		return -1;
+	}
+	fprintf(stderr, "done.\n");
+
+    // find the old root directory name
+	char *old_root_dir = basename(inner_mount_dir);
+	char old_root[sizeof(inner_mount_dir) + 1] = { "/" };
+	strcpy(&old_root[1], old_root_dir);
+
+    // unmount and remove the old root
+	fprintf(stderr, "=> unmounting %s...\n", old_root);
+	if (chdir("/")) {
+		fprintf(stderr, "chdir failed : %m\n");
+		return -1;
+	}
+	if (umount2(old_root, MNT_DETACH)) {
+		fprintf(stderr, "umount of the old root failed : %m\n");
+		return -1;
+	}
+	if (rmdir(old_root)) {
+		fprintf(stderr, "failed to remove old root: %m\n");
+		return -1;
+	}
+	fprintf(stderr, "done.\n");
+	return 0;
+}
+
 
 int handle_child_userns(pid_t child_pid, int fd) {
 	int map_file = 0;
@@ -68,7 +127,7 @@ int handle_child_userns(pid_t child_pid, int fd) {
 				fprintf(stderr, "failed to build path %m\n");
 				return -1;
 			}
-			fprintf(stderr, "writing %s...", path);
+			fprintf(stderr, "writing %s...\n", path);
 			if ((map_file = open(path, O_WRONLY)) == -1) {
 				fprintf(stderr, "open failed: %m\n");
 				return -1;
@@ -127,9 +186,8 @@ int userns(struct child_config *config)
 int child(void *arg){
 	struct child_config *config = arg;
 	if (set_hostname(config->hostname)
-	    //|| mounts(config)
-        || set_fs("fs")
-        || userns(config)
+	    || mounts(config)
+	    || userns(config)
 	    //|| capabilities()
 	    //|| syscalls()
         ) {
@@ -137,11 +195,11 @@ int child(void *arg){
 		return -1;
 	}
 	if (close(config->fd)) {
-		fprintf(stderr, "close failed: %m\n");
+		fprintf(stderr, "close failed : %m\n");
 		return -1;
 	}
 	if (execve(config->argv[0], config->argv, NULL)) {
-		fprintf(stderr, "execve failed! %m.\n");
+		fprintf(stderr, "execve failed : %m.\n");
 		return -1;
 	}
 	return 0;
@@ -153,6 +211,7 @@ int main() {
     int sockets[2] = {0};
     config.hostname = "container";
     config.argv = (char *[]) { "/bin/sh", NULL };
+    config.mount_dir = "fs"; // path to a valid root filesystem, i used i used https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.23.0-x86_64.tar.gz
     if (socketpair(AF_LOCAL, SOCK_SEQPACKET, 0, sockets)) {
 		fprintf(stderr, "socketpair failed: %m\n");
 		goto error;
