@@ -23,7 +23,7 @@ void handle_io_exit(struct kvm_run *run) {
     if (run->io.direction == KVM_EXIT_IO_OUT) {
         printf("Guest wrote to port 0x%x: value=0x%x\n",
                run->io.port,
-               *((uint8_t *)run + run->io.data_offset));
+               *(uint8_t *)((char *)run + run->io.data_offset));
     } else {
         printf("Guest read from port 0x%x\n", run->io.port);
     }
@@ -37,6 +37,16 @@ int main() {
     struct kvm_run *run;
     signal(SIGINT, sig_handler);
     int result = 0;
+
+    const uint8_t code[] = {
+	0xba, 0xf8, 0x03, /* mov $0x3f8, %dx */
+	0x00, 0xd8,       /* add %bl, %al */
+	0x04, '0',        /* add $'0', %al */
+	0xee,             /* out %al, (%dx) */
+	0xb0, '\n',       /* mov $'\n', %al */
+	0xee,             /* out %al, (%dx) */
+	0xf4,             /* hlt */
+    };
 
     // Open the KVM device
     kvm = open("/dev/kvm", O_RDWR);
@@ -59,6 +69,9 @@ int main() {
         result = 1;
         goto cleanup;
     }
+
+    // Copy the code to the allocated memory
+    memcpy(vm_mem, code, sizeof(code));
 
     // Map memory to the VM
     mem.slot = 0;
@@ -85,9 +98,16 @@ int main() {
     // Get the vCPU's registers and print the instruction pointer (RIP)
     struct kvm_regs regs;
     ioctl(vcpufd, KVM_GET_REGS, &regs);
+    regs.rip = 0x0; // Start executing at the beginning of the memory region
+    ioctl(vcpufd, KVM_SET_REGS, &regs);
     printf("RIP: 0x%llx\n", regs.rip);
 
-    run = (struct kvm_run *)vm_mem;
+    run = mmap(NULL, sizeof(*run), PROT_READ | PROT_WRITE, MAP_SHARED, vcpufd, 0);
+    if (run == MAP_FAILED) {
+        perror("Failed to mmap kvm_run");
+        result = 1;
+        goto cleanup;
+    }
 
     // Run the vCPU loop
     while (keep_running) {
