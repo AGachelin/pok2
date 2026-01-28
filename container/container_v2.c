@@ -27,7 +27,7 @@
 #define PIDS "64"
 #define WEIGHT "10"
 #define FD_COUNT 64
-#define SCMP_FAIL SCMP_ACT_ERRNO(EPERM)
+#define ALLOW(syscall) seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(syscall), 0)
 
 struct child_config {
 	int argc;
@@ -487,50 +487,113 @@ int userns(struct child_config *config)
 	return 0;
 }
 
-// blacklist dangerous syscalls using seccomp
-int syscalls()
+// whitelist syscalls (safer than blacklist)
+int syscalls(void)
 {
-	scmp_filter_ctx ctx = NULL;
-	fprintf(stderr, "=> filtering syscalls...");
-	if (!(ctx = seccomp_init(SCMP_ACT_ALLOW))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmodat), 1,
-				SCMP_A2(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmodat), 1,
-				SCMP_A2(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(unshare), 1,
-				SCMP_A0(SCMP_CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(clone), 1,
-				SCMP_A0(SCMP_CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(ioctl), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, TIOCSTI, TIOCSTI))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(keyctl), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(add_key), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(request_key), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(ptrace), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(mbind), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(migrate_pages), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(move_pages), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(set_mempolicy), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(userfaultfd), 0)
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(perf_event_open), 0)
-	    || seccomp_attr_set(ctx, SCMP_FLTATR_CTL_NNP, 0)
-	    || seccomp_load(ctx)) {
-		if (ctx) seccomp_release(ctx);
-		fprintf(stderr, "failed: %m\n");
-		return 1;
-	}
-	seccomp_release(ctx);
-	fprintf(stderr, "done.\n");
-	return 0;
+    scmp_filter_ctx ctx;
+    fprintf(stderr, "=> applying seccomp allowlist...");
+    // kill the process by default
+    ctx = seccomp_init(SCMP_ACT_KILL_PROCESS);
+    if (!ctx)
+        goto fail;
+    // enforce no new privileges
+    if (seccomp_attr_set(ctx, SCMP_FLTATR_CTL_NNP, 1))
+        goto fail;
+
+    // process lifecycle
+    ALLOW(exit);
+    ALLOW(exit_group);
+    ALLOW(wait4);
+    ALLOW(waitid);
+    // signals
+    ALLOW(rt_sigaction);
+    ALLOW(rt_sigprocmask);
+    ALLOW(rt_sigreturn);
+    ALLOW(sigaltstack);
+    ALLOW(kill);
+    ALLOW(tgkill);
+    // file I/O
+    ALLOW(read);
+    ALLOW(write);
+    ALLOW(close);
+    ALLOW(lseek);
+    ALLOW(fstat);
+    ALLOW(newfstatat);
+    ALLOW(statx);
+    ALLOW(poll);
+    ALLOW(ppoll);
+    ALLOW(select);
+    ALLOW(pselect6);
+    // file descriptors
+    ALLOW(dup);
+    ALLOW(dup2);
+    ALLOW(dup3);
+    ALLOW(fcntl);
+    // filesystem (non-mutating)
+    ALLOW(open);
+    ALLOW(openat);
+    ALLOW(readlink);
+    ALLOW(readlinkat);
+    ALLOW(getcwd);
+    // memory management
+    ALLOW(brk);
+    ALLOW(mmap);
+    ALLOW(munmap);
+    ALLOW(mprotect);
+    ALLOW(madvise);
+    // threading / synchronization
+    ALLOW(futex);
+    ALLOW(set_tid_address);
+    ALLOW(set_robust_list);
+    ALLOW(gettid);
+    // time
+    ALLOW(clock_gettime);
+    ALLOW(clock_nanosleep);
+    ALLOW(nanosleep);
+    ALLOW(gettimeofday);
+    // process info
+    ALLOW(getpid);
+    ALLOW(getppid);
+    ALLOW(getuid);
+    ALLOW(geteuid);
+    ALLOW(getgid);
+    ALLOW(getegid);
+    ALLOW(getrlimit);
+    ALLOW(prlimit64);
+    ALLOW(uname);
+    // exec
+    ALLOW(execve);
+    ALLOW(execveat);
+    // seccomp itself
+    ALLOW(seccomp);
+    ALLOW(prctl);
+    // groups / procfs / sysfs
+    ALLOW(access);
+    ALLOW(faccessat);
+    // networking
+    // ALLOW(socket);
+    // ALLOW(connect);
+    // ALLOW(bind);
+    // ALLOW(listen);
+    // ALLOW(accept);
+    // ALLOW(accept4);
+    // ALLOW(sendto);
+    // ALLOW(recvfrom);
+
+    if (seccomp_load(ctx))
+        goto fail;
+
+    seccomp_release(ctx);
+    fprintf(stderr, "done.\n");
+    return 0;
+
+fail:
+    if (ctx)
+        seccomp_release(ctx);
+    fprintf(stderr, "failed: %m\n");
+    return 1;
 }
+
 
 int child(void *arg){
 	struct child_config *config = arg;
