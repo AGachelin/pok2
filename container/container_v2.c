@@ -12,11 +12,18 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <linux/limits.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 
-#define STACK_SIZE 1024 * 64
+#define STACK_SIZE 1024 * 1024
 #define USERNS_OFFSET 10000
 #define USERNS_COUNT 2000
 #define FLAGS (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWUTS | SIGCHLD)
+#define MEMORY "1073741824"
+#define SHARES "256"
+#define PIDS "64"
+#define WEIGHT "10"
+#define FD_COUNT 64
 
 struct child_config {
 	int argc;
@@ -26,6 +33,168 @@ struct child_config {
 	char **argv;
 	char *mount_dir;
 };
+
+// cgroup controller and its settings
+struct cgrp_control {
+	char control[256];
+	struct cgrp_setting {
+		char name[256];
+		char value[256];
+	} **settings;
+};
+
+// cgroup setting to add the current process to the cgroup's tasks file
+struct cgrp_setting add_to_tasks = {
+	.name = "tasks",
+	.value = "0"
+};
+
+// array of pointers to cgroup controllers
+struct cgrp_control *cgrps[] = {
+    // controller for memory limits
+	& (struct cgrp_control) {
+		.control = "memory",
+        // array of pointers to cgroup settings for this controller
+		.settings = (struct cgrp_setting *[]) {
+			& (struct cgrp_setting) {
+				.name = "memory.limit_in_bytes",
+				.value = MEMORY
+			},
+			& (struct cgrp_setting) {
+				.name = "memory.kmem.limit_in_bytes",
+				.value = MEMORY
+			},
+			&add_to_tasks,
+			NULL
+		}
+	},
+    // controller for CPU shares
+	& (struct cgrp_control) {
+		.control = "cpu",
+		.settings = (struct cgrp_setting *[]) {
+			& (struct cgrp_setting) {
+				.name = "cpu.shares",
+				.value = SHARES
+			},
+			&add_to_tasks,
+			NULL
+		}
+	},
+    // controller for PIDs limit
+	& (struct cgrp_control) {
+		.control = "pids",
+		.settings = (struct cgrp_setting *[]) {
+			& (struct cgrp_setting) {
+				.name = "pids.max",
+				.value = PIDS
+			},
+			&add_to_tasks,
+			NULL
+		}
+	},
+    // controller to manage block IO weight i.e disk IO priority
+	& (struct cgrp_control) {
+		.control = "blkio",
+		.settings = (struct cgrp_setting *[]) {
+			& (struct cgrp_setting) {
+				.name = "blkio.weight",
+				.value = WEIGHT
+			},
+			&add_to_tasks,
+			NULL
+		}
+	},
+	NULL
+};
+
+int resources(struct child_config *config)
+{
+	fprintf(stderr, "=> setting cgroups...\n");
+    // iterate over each cgroup controller
+	for (struct cgrp_control **cgrp = cgrps; *cgrp; cgrp++) {
+		char dir[PATH_MAX] = {0};
+		fprintf(stderr, "%s...", (*cgrp)->control);
+		if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s/%s",
+			     (*cgrp)->control, config->hostname) == -1) {
+			return -1;
+		}
+		if (mkdir(dir, S_IRUSR | S_IWUSR | S_IXUSR)) { // grants rwx permissions only to owner i.e root
+			fprintf(stderr, "mkdir %s failed: %m\n", dir);
+			return -1;
+		}
+        // iterate over each setting for the current cgroup controller and write it to the appropriate file
+		for (struct cgrp_setting **setting = (*cgrp)->settings; *setting; setting++) {
+			char path[PATH_MAX] = {0};
+			int fd = 0;
+			if (snprintf(path, sizeof(path), "%s/%s", dir,
+				     (*setting)->name) == -1) {
+				fprintf(stderr, "snprintf failed: %m\n");
+				return -1;
+			}
+			if ((fd = open(path, O_WRONLY)) == -1) {
+				fprintf(stderr, "opening %s failed: %m\n", path);
+				return -1;
+			}
+			if (write(fd, (*setting)->value, strlen((*setting)->value)) == -1) {
+				fprintf(stderr, "writing to %s failed: %m\n", path);
+				close(fd);
+				return -1;
+			}
+			close(fd);
+		}
+	}
+	fprintf(stderr, "done.\n");
+
+    fprintf(stderr, "=> setting rlimit...");
+    // sets the file descriptor limit (maximum number of open files) for the current process
+	if (setrlimit(RLIMIT_NOFILE,
+		      & (struct rlimit) {
+			.rlim_max = FD_COUNT,
+			.rlim_cur = FD_COUNT,
+		})) {
+		fprintf(stderr, "failed: %m\n");
+		return -1;
+	}
+	fprintf(stderr, "done.\n");
+	return 0;
+}
+
+int free_resources(struct child_config *config)
+{   
+    // clean up cgroups created for the container, it uses v1 logic and is not valid for cgroup v2
+	fprintf(stderr, "=> cleaning cgroups...");
+	for (struct cgrp_control **cgrp = cgrps; *cgrp; cgrp++) {
+		char dir[PATH_MAX] = {0};
+		char task[PATH_MAX] = {0};
+		int task_fd = 0;
+        // open the tasks file for the current cgroup controller
+		if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s/%s",
+			     (*cgrp)->control, config->hostname) == -1
+		    || snprintf(task, sizeof(task), "/sys/fs/cgroup/%s/tasks",
+				(*cgrp)->control) == -1) {
+			fprintf(stderr, "snprintf failed: %m\n");
+			return -1;
+		}
+		if ((task_fd = open(task, O_WRONLY)) == -1) {
+			fprintf(stderr, "opening %s failed: %m\n", task);
+			return -1;
+		}
+        // remove the tasks from the cgroup by writing "0" to the tasks file
+		if (write(task_fd, "0", 2) == -1) {
+			fprintf(stderr, "writing to %s failed: %m\n", task);
+			close(task_fd);
+			return -1;
+		}
+		close(task_fd);
+        // remove the cgroup directory, it is now allowed as there are no tasks associated with it
+		if (rmdir(dir)) {
+			fprintf(stderr, "rmdir %s failed: %m", dir);
+			return -1;
+		}
+	}
+	fprintf(stderr, "done.\n");
+	return 0;
+}
 
 char* create_stack() {
     char* stack = (char*)malloc(STACK_SIZE);
@@ -246,6 +415,7 @@ finish_child:;
 	err |= WEXITSTATUS(child_status);
     
 clear_resources:
+    free_resources(&config);
     free(stack_top - STACK_SIZE);
 error:
     err=1;
