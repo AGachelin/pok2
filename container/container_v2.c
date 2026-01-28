@@ -1,5 +1,5 @@
 // source : https://blog.lizzie.io/linux-containers-in-500-loc.html
-// command to compile : gcc container.c -o container -lseccomp
+// command to compile : gcc container.c -o container -lseccomp -lcap
 #define _GNU_SOURCE
 #include <sched.h>
 #include <grp.h>
@@ -16,6 +16,9 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <sys/capability.h> // libcap-dev should be installed
+#include <linux/prctl.h>
+#include <sys/prctl.h>
 #include <seccomp.h> // libseccomp-dev should be installed
 
 #define STACK_SIZE 1024 * 1024
@@ -489,12 +492,63 @@ int userns(struct child_config *config)
 	return 0;
 }
 
+// capabilities define what the root user can do
+// we drop the unnecessary ones
+// see the source of the code linked at the top for the explanation of each dropped capability
+int capabilities()
+{
+	fprintf(stderr, "=> dropping capabilities...\n");
+	int drop_caps[] = {
+		CAP_AUDIT_CONTROL,
+		CAP_AUDIT_READ,
+		CAP_AUDIT_WRITE,
+		CAP_BLOCK_SUSPEND,
+		CAP_DAC_READ_SEARCH,
+		CAP_FSETID,
+		CAP_IPC_LOCK,
+		CAP_MAC_ADMIN,
+		CAP_MAC_OVERRIDE,
+		CAP_MKNOD,
+		CAP_SETFCAP,
+		CAP_SYSLOG,
+		CAP_SYS_ADMIN,
+		CAP_SYS_BOOT,
+		CAP_SYS_MODULE,
+		CAP_SYS_NICE,
+		CAP_SYS_RAWIO,
+		CAP_SYS_RESOURCE,
+		CAP_SYS_TIME,
+		CAP_WAKE_ALARM
+	};
+	size_t num_caps = sizeof(drop_caps) / sizeof(*drop_caps);
+	fprintf(stderr, "bounding...\n");
+    // drop the capabilities from the bounding set (i.e the maximum set of capabilities that can be held by any process)
+	for (size_t i = 0; i < num_caps; i++) {
+		if (prctl(PR_CAPBSET_DROP, drop_caps[i], 0, 0, 0)) {
+			fprintf(stderr, "prctl failed: %m\n");
+			return 1;
+		}
+	}
+	fprintf(stderr, "inheritable...\n");
+    // drop the capabilities from the inheritable set (i.e the capabilities that can be inherited across execve calls)
+	cap_t caps = NULL;
+	if (!(caps = cap_get_proc())
+	    || cap_set_flag(caps, CAP_INHERITABLE, num_caps, drop_caps, CAP_CLEAR)
+	    || cap_set_proc(caps)) {
+		fprintf(stderr, "failed: %m\n");
+		if (caps) cap_free(caps);
+		return 1;
+	}
+	cap_free(caps);
+	fprintf(stderr, "done.\n");
+	return 0;
+}
 
 // blacklist dangerous syscalls using seccomp
 int blacklist_syscalls()
 {
 	scmp_filter_ctx ctx = NULL;
-	fprintf(stderr, "=> filtering syscalls...");
+	fprintf(stderr, "=> filtering syscalls...\n");
 	if (!(ctx = seccomp_init(SCMP_ACT_ALLOW))
 	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1,
 				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
@@ -540,7 +594,7 @@ int blacklist_syscalls()
 int whitelist_syscalls(void)
 {
     scmp_filter_ctx ctx;
-    fprintf(stderr, "=> applying seccomp allowlist...");
+    fprintf(stderr, "=> applying seccomp allowlist...\n");
     
     ctx = seccomp_init(SCMP_ACT_KILL_PROCESS); // kill by default
     if (!ctx) goto fail;
