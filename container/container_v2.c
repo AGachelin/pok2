@@ -14,6 +14,7 @@
 #include <linux/limits.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #define STACK_SIZE 1024 * 1024
 #define USERNS_OFFSET 10000
@@ -34,6 +35,10 @@ struct child_config {
 	char *mount_dir;
 };
 
+struct cgrp_v2 {
+    struct cgrp_setting **settings;
+};
+
 // cgroup controller and its settings
 struct cgrp_control {
 	char control[256];
@@ -47,6 +52,12 @@ struct cgrp_control {
 struct cgrp_setting add_to_tasks = {
 	.name = "tasks",
 	.value = "0"
+};
+
+// cgroup setting to add the current process to the cgroup's cgroup.procs file, for cgroup v2
+struct cgrp_setting add_to_cgroup = {
+    .name  = "cgroup.procs",
+    .value = "0"
 };
 
 // array of pointers to cgroup controllers
@@ -107,13 +118,44 @@ struct cgrp_control *cgrps[] = {
 	NULL
 };
 
+// updated cgroup v2 structure
+struct cgrp_v2 cgrp = {
+    .settings = (struct cgrp_setting *[]) {
+        &(struct cgrp_setting){
+            .name  = "memory.max",
+            .value = MEMORY
+        },
+        &(struct cgrp_setting){
+            .name  = "cpu.weight",
+            .value = SHARES
+        },
+        &(struct cgrp_setting){
+            .name  = "pids.max",
+            .value = PIDS
+        },
+        &(struct cgrp_setting){
+            .name  = "io.weight",
+            .value = WEIGHT
+        },
+        &add_to_cgroup,
+        NULL
+    }
+};
+
+int is_cgroup_v2(void)
+{
+    struct stat st;
+    return stat("/sys/fs/cgroup/cgroup.controllers", &st) == 0;
+}
+
+
 int resources(struct child_config *config)
 {
 	fprintf(stderr, "=> setting cgroups...\n");
     // iterate over each cgroup controller
 	for (struct cgrp_control **cgrp = cgrps; *cgrp; cgrp++) {
 		char dir[PATH_MAX] = {0};
-		fprintf(stderr, "%s...", (*cgrp)->control);
+		fprintf(stderr, "%s...\n", (*cgrp)->control);
 		if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s/%s",
 			     (*cgrp)->control, config->hostname) == -1) {
 			return -1;
@@ -145,7 +187,7 @@ int resources(struct child_config *config)
 	}
 	fprintf(stderr, "done.\n");
 
-    fprintf(stderr, "=> setting rlimit...");
+    fprintf(stderr, "=> setting rlimit...\n");
     // sets the file descriptor limit (maximum number of open files) for the current process
 	if (setrlimit(RLIMIT_NOFILE,
 		      & (struct rlimit) {
@@ -159,10 +201,63 @@ int resources(struct child_config *config)
 	return 0;
 }
 
+int resources_v2(struct child_config *config)
+{
+    char dir[PATH_MAX] = {0};
+    fprintf(stderr, "=> setting cgroups v2...\n");
+
+    // only one unified hierarchy exists in cgroup v2 instead of multiple hierarchies for each controller
+    if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s",
+                 config->hostname) < 0) {
+        return -1;
+    }
+
+    if (mkdir(dir, 0700) && errno != EEXIST) {
+        fprintf(stderr, "mkdir %s failed: %m\n", dir);
+        return -1;
+    }
+
+    // iterate over each cgroup setting and write it to the appropriate file
+    for (struct cgrp_setting **s = cgrp.settings; *s; s++) {
+        char path[PATH_MAX] = {0};
+        int fd;
+        if (snprintf(path, sizeof(path), "%s/%s", dir, (*s)->name) < 0) {
+            return -1;
+        }
+        fd = open(path, O_WRONLY);
+        if (fd == -1) {
+            fprintf(stderr, "open %s failed: %m\n", path);
+            return -1;
+        }
+        if (write(fd, (*s)->value, strlen((*s)->value)) == -1) {
+            fprintf(stderr, "write %s failed: %m\n", path);
+            close(fd);
+            return -1;
+        }
+        close(fd);
+    }
+
+    fprintf(stderr, "done.\n");
+
+    // rlimit stays unchanged
+    fprintf(stderr, "=> setting rlimit...\n");
+    if (setrlimit(RLIMIT_NOFILE,
+        &(struct rlimit){
+            .rlim_cur = FD_COUNT,
+            .rlim_max = FD_COUNT,
+        })) {
+        fprintf(stderr, "failed: %m\n");
+        return -1;
+    }
+
+    fprintf(stderr, "done.\n");
+    return 0;
+}
+
 int free_resources(struct child_config *config)
 {   
-    // clean up cgroups created for the container, it uses v1 logic and is not valid for cgroup v2
-	fprintf(stderr, "=> cleaning cgroups...");
+    // clean up cgroups created for the container
+	fprintf(stderr, "=> cleaning cgroups...\n");
 	for (struct cgrp_control **cgrp = cgrps; *cgrp; cgrp++) {
 		char dir[PATH_MAX] = {0};
 		char task[PATH_MAX] = {0};
@@ -180,7 +275,7 @@ int free_resources(struct child_config *config)
 			return -1;
 		}
         // remove the tasks from the cgroup by writing "0" to the tasks file
-		if (write(task_fd, "0", 2) == -1) {
+		if (write(task_fd, "0", 1) == -1) {
 			fprintf(stderr, "writing to %s failed: %m\n", task);
 			close(task_fd);
 			return -1;
@@ -194,6 +289,43 @@ int free_resources(struct child_config *config)
 	}
 	fprintf(stderr, "done.\n");
 	return 0;
+}
+
+int free_resources_v2(struct child_config *config)
+{
+    char dir[PATH_MAX]  = {0};
+    int fd;
+
+    fprintf(stderr, "=> cleaning cgroups v2...\n");
+
+    if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s",
+                 config->hostname) < 0) {
+        return -1;
+    }
+
+    // Move process back to root cgroup
+    fd = open("/sys/fs/cgroup/cgroup.procs", O_WRONLY);
+    if (fd == -1) {
+        fprintf(stderr, "open cgroup.procs failed: %m\n");
+        return -1;
+    }
+
+    if (write(fd, "0", 1) == -1) {
+        fprintf(stderr, "write cgroup.procs failed: %m\n");
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+
+    // Remove container cgroup
+    if (rmdir(dir)) {
+        fprintf(stderr, "rmdir %s failed: %m\n", dir);
+        return -1;
+    }
+
+    fprintf(stderr, "done.\n");
+    return 0;
 }
 
 char* create_stack() {
@@ -392,6 +524,18 @@ int main() {
 	config.fd = sockets[1];
     char* stack_top = create_stack();
     printf("Stack created at address: %p\n", stack_top);
+    int is_v2 = is_cgroup_v2();
+    if (is_v2) {
+        if (resources_v2(&config)) {
+            err = 1;
+            goto clear_resources;
+        }
+    } else {
+        if (resources(&config)) {
+            err = 1;
+            goto clear_resources;
+        }
+    }
     pid_t pid = clone(child, stack_top, FLAGS, &config);
     if (pid == -1) {
         perror("Failed to create clone");
@@ -415,7 +559,11 @@ finish_child:;
 	err |= WEXITSTATUS(child_status);
     
 clear_resources:
-    free_resources(&config);
+    if (is_v2) {
+        free_resources_v2(&config);
+    } else {
+        free_resources(&config);
+    }
     free(stack_top - STACK_SIZE);
 error:
     err=1;
