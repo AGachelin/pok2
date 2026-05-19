@@ -1,7 +1,4 @@
-# pok2
-
-This repository contains Linux container and virtualization experiments.
-
+# Container & Virtualization experiments on linux (student project)
 ## Project structure
 
 - `container/`: contains two user-space container experiments for with different isolation levels.
